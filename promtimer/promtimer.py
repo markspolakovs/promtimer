@@ -26,6 +26,7 @@ import webbrowser
 import sys
 import getpass
 import logging
+import yaml
 
 # local imports
 import util
@@ -217,6 +218,7 @@ def main():
     parser.add_argument('--dont-open-browser', dest='dont_open_browser', default=False,
                         action='store_true',
                         help='don\'t open browser tab automatically on start')
+    parser.add_argument('--aggregate', dest='aggregate', default=False, action='store_true', help='aggregate')
     parser.add_argument("--verbose", dest='verbose', action='store_true',
                         default=False, help="verbose output")
     args = parser.parse_args()
@@ -251,9 +253,12 @@ def main():
 
     grafana_port = args.grafana_port
     prometheus_base_port = grafana_port + 1
+    if args.aggregate:
+        prom_aggregate_port = prometheus_base_port
+        prometheus_base_port += 1        
 
     if not args.cluster:
-        stats_sources = cbstats.CBCollect.get_stats_sources(prometheus_base_port)
+        stats_sources = cbstats.CBCollect.get_stats_sources(prometheus_base_port, args.aggregate)
         if not stats_sources:
             sys.exit(1)
         times = cbstats.CBCollect.compute_min_and_max_times(stats_sources)
@@ -295,6 +300,36 @@ def main():
     cbstats.Source.PROMETHEUS_BIN = PROMETHEUS_BIN
     processes = cbstats.Source.maybe_start_stats_servers(stats_sources,
                                                          PROMTIMER_LOGS_DIR)
+
+    if args.aggregate:
+        aggregator_config = {
+            'global': {},
+            'scrape_configs': [],
+            'remote_read': []
+        }
+        for source in stats_sources:
+            read_cfg = {
+                'name': source.short_name(),
+                'url': 'http://{}:{}/{}api/v1/read'.format(source.host(), source.port(), source.stats_url_path())
+            }
+            if source.requires_auth():
+                read_cfg['basic_auth'] = {
+                    'username': source.basic_auth_user(),
+                    'password': source.basic_auth_password()
+                }
+            aggregator_config['remote_read'].append(read_cfg)
+        aggregator_cfg_path = path.join(PROMTIMER_DIR, 'aggregator.yml')
+        with open(aggregator_cfg_path, 'w+') as fd:
+            yaml.dump(aggregator_config, fd)
+        aggregator_log_path = path.join(PROMTIMER_LOGS_DIR, "prom-aggregator.log")
+        listen_addr = '0.0.0.0:{}'.format(prom_aggregate_port)
+        logging.info('starting aggregator prometheus on port {}; config at {}; logging to {}', prom_aggregate_port, aggregator_cfg_path, aggregator_log_path)
+        agg_args = [cbstats.Source.PROMETHEUS_BIN,
+            '--config.file', aggregator_cfg_path,
+            '--query.lookback-delta', '600s',
+            '--web.listen-address', listen_addr]
+        processes.append(util.start_process(agg_args, aggregator_log_path))
+
     processes.append(start_grafana(args.grafana_home_path, grafana_port))
 
     time.sleep(0.1)

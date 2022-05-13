@@ -125,12 +125,13 @@ class CBCollect(Source):
     Represents a source of stats data that is a Prometheus instance running against
     the stats snapshot in a cbcollect.
     """
-    def __init__(self, cbcollect_dir, short_name, prometheus_port, zipfile=None):
+    def __init__(self, cbcollect_dir, short_name, prometheus_port, zipfile=None, aggregated=False):
         super(CBCollect, self).__init__(prometheus_port)
         self._short_name = short_name
         self._cbcollect_dir = cbcollect_dir
         self._config = None
         self._zipfile = zipfile
+        self._aggregated = aggregated
 
     def short_name(self):
         return self._short_name
@@ -144,8 +145,16 @@ class CBCollect(Source):
         """
         log_path = path.join(log_dir, 'prom-{}.log'.format(self._short_name))
         listen_addr = '0.0.0.0:{}'.format(self.port())
+        if self._aggregated:
+            agg_config_path = path.join(self._cbcollect_dir, '.promtimer.yml')
+            with open(agg_config_path, 'w+') as fd:
+                with open(path.join(util.get_root_dir(), 'noscrape-aggregate.yml'), 'r') as src_fd:
+                    template = src_fd.read()
+                template = template.replace('$NODE$', self._short_name)
+                fd.write(template)
+                logging.info('written config to {}'.format(agg_config_path))
         args = [Source.PROMETHEUS_BIN,
-                '--config.file', path.join(util.get_root_dir(), 'noscrape.yml'),
+                '--config.file', agg_config_path if self._aggregated else path.join(util.get_root_dir(), 'noscrape.yml'),
                 '--storage.tsdb.path', path.join(self._cbcollect_dir, 'stats_snapshot'),
                 '--storage.tsdb.no-lockfile',
                 '--storage.tsdb.retention.time', '10y',
@@ -316,7 +325,7 @@ class CBCollect(Source):
         return cbcollect_dirs
 
     @staticmethod
-    def get_stats_sources(base_port):
+    def get_stats_sources(base_port, aggregate=False):
         result = []
         cbcollects = CBCollect.get_cbcollect_dirs()
         if len(cbcollects) == 0:
@@ -336,7 +345,8 @@ class CBCollect(Source):
             source = CBCollect(cbcollect_dir,
                                name,
                                base_port + idx,
-                               zipfile)
+                               zipfile,
+                               aggregated=aggregate)
             result.append(source)
         return result
 
